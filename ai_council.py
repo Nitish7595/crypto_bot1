@@ -23,8 +23,6 @@ import json
 import time
 import requests
 from news_pattern_agent import NewsPatternAgent
-from candle_pattern_agent import CandlePatternAgent
-from candle_pattern_agent import CandlePatternAgent
 import ccxt
 import pandas as pd
 import numpy as np
@@ -550,8 +548,6 @@ class AICouncil:
         self.scorer         = ConfluenceScorer()
         self.risk_mgr       = RiskManager()
         self.news_agent     = NewsPatternAgent(config)
-        self.candle_agent   = CandlePatternAgent(config)
-        self.candle_agent   = CandlePatternAgent(config)
 
     def ask_claude(self, symbol, ind, bull_votes, bear_votes, news,
                    fear_greed, regime, sr_zone, confluence_score):
@@ -762,25 +758,7 @@ Reply JSON only: {{"action":"BUY/SELL/HOLD","confidence":0-100,"reason":"max 10 
                 "reason":     news_result["reason"],
             })
 
-        # ── STEP 7c: Candle Pattern vote ───────────────
-        candle_result = self.candle_agent.analyse(symbol, df15)
-        if candle_result:
-            votes.append({
-                "agent":      candle_result["agent"],
-                "vote":       candle_result["vote"],
-                "confidence": candle_result["confidence"],
-                "reason":     candle_result["reason"],
-            })
-
-        # ── STEP 7c: Candle Pattern vote ──────────────
-        candle_result = self.candle_agent.analyse(symbol, df15)
-        if candle_result and candle_result["vote"] != "HOLD":
-            votes.append({
-                "agent":      "Candle Patterns",
-                "vote":       candle_result["vote"],
-                "confidence": candle_result["confidence"],
-                "reason":     candle_result["reason"],
-            })
+        # Candle pattern agent removed — not available
 
         # ── STEP 8: Deduplicate votes ─────────────────
         # Remove duplicate agent votes — keep only the last vote per agent
