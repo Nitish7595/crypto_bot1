@@ -59,7 +59,7 @@ CONFIG = {
     # Coins to watch
     "symbols":        ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
     "timeframe":      "15m",
-    "scan_every":     300,       # 5 minutes — good for Railway free tier
+    "scan_every":     60,       # 5 minutes — good for Railway free tier
 
     # Your account
     "account_usdt":   1000,
