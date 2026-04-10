@@ -24,7 +24,6 @@ import time
 import requests
 from news_pattern_agent import NewsPatternAgent
 from candle_pattern_agent import CandlePatternAgent
-from market_filters import DailyTrendFilter, FundingRateFilter, SessionFilter
 import ccxt
 import pandas as pd
 import numpy as np
@@ -551,9 +550,6 @@ class AICouncil:
         self.risk_mgr       = RiskManager()
         self.news_agent     = NewsPatternAgent(config)
         self.candle_agent   = CandlePatternAgent(config)
-        self.daily_filter   = DailyTrendFilter()
-        self.funding_filter = FundingRateFilter()
-        self.session_filter = SessionFilter()
 
     def ask_claude(self, symbol, ind, bull_votes, bear_votes, news,
                    fear_greed, regime, sr_zone, confluence_score):
@@ -737,30 +733,6 @@ Reply JSON only: {{"action":"BUY/SELL/HOLD","confidence":0-100,"reason":"max 10 
                     "reason": f"Confluence score {conf_score}/100 — below threshold",
                     "votes": []}
 
-        # ── STEP 5b: SESSION FILTER ────────────────────
-        session_quality, session_adj, session_label, session_ok = self.session_filter.check()
-        conf_score = max(0, min(100, conf_score + session_adj))
-        print(f"    [Session] Score adjusted {session_adj:+d} → {conf_score}/100")
-
-        # ── STEP 5c: DAILY TREND FILTER ────────────────
-        trend_ok, trend_reason = self.daily_filter.check(symbol, direction)
-        if not trend_ok:
-            return {"action": "HOLD", "reason": trend_reason, "votes": []}
-        print(f"    [Daily]   {trend_reason}")
-
-        # ── STEP 5d: FUNDING RATE ───────────────────────
-        funding_adj, funding_reason = self.funding_filter.check(symbol, direction)
-        conf_score = max(0, min(100, conf_score + funding_adj))
-        print(f"    [Funding] {funding_reason}")
-
-        # Re-check after filter adjustments
-        if conf_score < 52:
-            return {
-                "action": "HOLD",
-                "reason": f"Score dropped to {conf_score}/100 after filters",
-                "votes":  [],
-            }
-
         # ── STEP 6: Safety checks ──────────────────────
         warnings = self.risk_mgr.check_safety(all_trades, account, risk_pct, ind)
         if warnings:
@@ -840,12 +812,6 @@ Reply JSON only: {{"action":"BUY/SELL/HOLD","confidence":0-100,"reason":"max 10 
             "reason":     f"Score {conf_score}/100 | {confluence_label} | {regime} | {sr_zone}"
         })
 
-        # Get filter summaries for Telegram
-        trend_data   = self.daily_filter.cache.get(symbol.split("/")[0], {})
-        funding_data = self.funding_filter.cache.get(symbol.split("/")[0])
-        funding_str  = f"{funding_data['rate_pct']:+.4f}%" if funding_data else "N/A"
-        sess_quality, sess_adj, sess_label, _ = self.session_filter.check()
-
         return {
             "action":          direction,
             "reason":          f"Score {final_score:.0f}/100 | {confluence_label} | {regime}",
@@ -857,8 +823,4 @@ Reply JSON only: {{"action":"BUY/SELL/HOLD","confidence":0-100,"reason":"max 10 
             "confluence":      confluence_label,
             "regime":          regime,
             "sr_zone":         sr_zone,
-            "daily_trend":     trend_data[0] if trend_data else "N/A",
-            "funding_rate":    funding_str,
-            "session":         f"{sess_quality} ({sess_label[:30]})",
-            "fear_greed":      fear_greed,
         }
