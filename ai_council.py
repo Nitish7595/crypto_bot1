@@ -25,6 +25,7 @@ import requests
 from news_pattern_agent import NewsPatternAgent
 from candle_pattern_agent import CandlePatternAgent
 from market_filters import DailyTrendFilter, FundingRateFilter, SessionFilter
+from sr_engine import SRAgent
 import ccxt
 import pandas as pd
 import numpy as np
@@ -551,6 +552,7 @@ class AICouncil:
         self.risk_mgr       = RiskManager()
         self.news_agent     = NewsPatternAgent(config)
         self.candle_agent   = CandlePatternAgent(config)
+        self.sr_agent       = SRAgent(config)
         self.daily_filter   = DailyTrendFilter()
         self.funding_filter = FundingRateFilter()
         self.session_filter = SessionFilter()
@@ -798,6 +800,21 @@ Reply JSON only: {{"action":"BUY/SELL/HOLD","confidence":0-100,"reason":"max 10 
                 "reason":     candle_result["reason"],
             })
 
+        # ── STEP 7d: S/R Agent vote ────────────────────
+        sr_result = self.sr_agent.analyse(symbol, ind["price"])
+        if sr_result and sr_result["vote"] != "HOLD":
+            votes.append({
+                "agent":      "S/R Agent",
+                "vote":       sr_result["vote"],
+                "confidence": sr_result["confidence"],
+                "reason":     sr_result["reason"],
+            })
+            # If S/R agent fires with high confidence
+            # boost overall confidence significantly
+            if sr_result["confidence"] >= 70:
+                conf_score = min(100, conf_score + 15)
+                print(f"    [S/R Agent] High confidence S/R signal — boosting score to {conf_score}")
+
         # ── STEP 8: Deduplicate votes ─────────────────
         # Remove duplicate agent votes — keep only the last vote per agent
         seen_agents = {}
@@ -861,4 +878,6 @@ Reply JSON only: {{"action":"BUY/SELL/HOLD","confidence":0-100,"reason":"max 10 
             "funding_rate":    funding_str,
             "session":         f"{sess_quality} ({sess_label[:30]})",
             "fear_greed":      fear_greed,
+            "supports":        sr_result.get("supports", [])    if sr_result else [],
+            "resistances":     sr_result.get("resistances", []) if sr_result else [],
         }

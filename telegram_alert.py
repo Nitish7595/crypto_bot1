@@ -262,6 +262,19 @@ class TelegramAlert:
             f"⚠️ Max Risk   : ${levels.get('risk_usdt', 0):,.2f} USDT\n"
             f"🔧 Leverage   : {levels.get('leverage',1)}x\n\n"
             f"<b>Conditions fired:</b>{cond_text}\n\n"
+        + (
+            f"📊 <b>Key S/R Levels:</b>\n"
+            + "".join(
+                f"  🟢 Support  : ${s['level']:,.4f} ({s['confirmed_by']}) {s['touches']} touches\n"
+                for s in decision.get("supports", [])[:2]
+            )
+            + "".join(
+                f"  🔴 Resist   : ${r['level']:,.4f} ({r['confirmed_by']}) {r['touches']} touches\n"
+                for r in decision.get("resistances", [])[:2]
+            )
+            if decision.get("supports") or decision.get("resistances") else ""
+        )
+        +
             f"<b>AI Votes:</b>{votes_text}"
         )
 
