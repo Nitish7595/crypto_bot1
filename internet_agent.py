@@ -33,31 +33,65 @@ class InternetAgent:
             "SOL/USDT": {"cg": "solana",       "av": "SOL"},
             "BNB/USDT": {"cg": "binancecoin",  "av": "BNB"},
         }
-        self.exchange = None
+        self.exchange      = None
+        self._candle_cache = {}   # {symbol_tf: (df, timestamp)}
 
     def get_candles(self, symbol, timeframe, limit=200):
         """
-        Fetches OHLCV candles.
-        1. Alpha Vantage (500 req/day free, full OHLCV)
-        2. CoinGecko OHLC (confirmed working, fallback)
+        Fetches OHLCV candles. Tries 4 sources in order:
+        1. Alpha Vantage  — if ALPHA_VANTAGE_KEY set (500/day)
+        2. Binance US     — public API, no geo blocks, no key needed
+        3. Kraken         — public API, no key needed
+        4. CoinGecko      — always works, ~96 candles
         """
-        # Try Alpha Vantage first if key is set
+        # Cache candles for 60 seconds to reduce API calls
+        cache_key = f"{symbol}_{timeframe}"
+        now       = time.time()
+        if cache_key in self._candle_cache:
+            cached_df, cached_at = self._candle_cache[cache_key]
+            if now - cached_at < 60:
+                return cached_df
+
+        errors = []
+
+        # Source 1 — Alpha Vantage (needs free key)
         if self.av_key:
             try:
                 df = self._candles_alphavantage(symbol, timeframe, limit)
-                if df is not None and len(df) >= 50:
+                if df is not None and len(df) >= 30:
+                    self._candle_cache[cache_key] = (df, now)
                     return df
             except Exception as e:
-                print(f"    [Internet] Alpha Vantage failed: {str(e)[:60]} — trying CoinGecko")
+                errors.append(f"AV:{str(e)[:40]}")
 
-        # Fall back to CoinGecko
+        # Source 2 — Binance US public API (no geo blocks)
         try:
-            df = self._candles_coingecko(symbol, timeframe, limit)
-            if df is not None and len(df) >= 50:
+            df = self._candles_binanceus(symbol, timeframe, limit)
+            if df is not None and len(df) >= 30:
+                self._candle_cache[cache_key] = (df, now)
                 return df
         except Exception as e:
-            print(f"    [Internet] CoinGecko OHLC failed: {str(e)[:60]}")
+            errors.append(f"BinanceUS:{str(e)[:40]}")
 
+        # Source 3 — Kraken
+        try:
+            df = self._candles_kraken(symbol, timeframe, limit)
+            if df is not None and len(df) >= 30:
+                self._candle_cache[cache_key] = (df, now)
+                return df
+        except Exception as e:
+            errors.append(f"Kraken:{str(e)[:40]}")
+
+        # Source 4 — CoinGecko (always works)
+        try:
+            df = self._candles_coingecko(symbol, timeframe, limit)
+            if df is not None and len(df) >= 30:
+                self._candle_cache[cache_key] = (df, now)
+                return df
+        except Exception as e:
+            errors.append(f"CoinGecko:{str(e)[:40]}")
+
+        print(f"    [Internet] All sources failed: {' | '.join(errors)}")
         raise ConnectionError(f"All price sources failed for {symbol}")
 
     def _candles_alphavantage(self, symbol, timeframe, limit):
@@ -135,6 +169,102 @@ class InternetAgent:
         print(f"    [Internet] Alpha Vantage: {len(df)} {timeframe} candles for {symbol}")
         return df
 
+    def _candles_binanceus(self, symbol, timeframe, limit):
+        """
+        Binance US public REST API.
+        No API key needed for candle data.
+        No geo blocks — US-based, open to all servers.
+        Full OHLCV data, up to 1000 candles per request.
+        """
+        # Binance US uses same format as Binance global
+        coin = symbol.split("/")[0]
+        pair = f"{coin}USDT"
+
+        tf_map = {
+            "1m": "1m", "5m": "5m", "15m": "15m",
+            "30m": "30m", "1h": "1h", "4h": "4h", "1d": "1d",
+        }
+        interval = tf_map.get(timeframe)
+        if not interval:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+        r = requests.get(
+            "https://api.binance.us/api/v3/klines",
+            params={
+                "symbol":    pair,
+                "interval":  interval,
+                "limit":     min(limit, 1000),
+            },
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
+
+        if r.status_code == 451:
+            raise ValueError("Binance US geo-blocked from this server")
+        if r.status_code != 200:
+            raise ValueError(f"Binance US HTTP {r.status_code}")
+
+        raw = r.json()
+        if not raw or len(raw) < 10:
+            raise ValueError(f"Only {len(raw)} candles from Binance US")
+
+        # Binance format: [ts, open, high, low, close, volume, ...]
+        df = pd.DataFrame(raw, columns=[
+            "ts","open","high","low","close","volume",
+            "close_ts","quote_vol","trades","taker_buy_base",
+            "taker_buy_quote","ignore"
+        ])
+        df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+        df = df.set_index("ts")
+        df = df[["open","high","low","close","volume"]].astype(float)
+        print(f"    [Internet] Binance US: {len(df)} {timeframe} candles for {symbol}")
+        return df
+
+    def _candles_kraken(self, symbol, timeframe, limit):
+        """Kraken public API — US exchange, no geo blocks on public data."""
+        kraken_map = {
+            "BTC/USDT": "XBTUSD", "ETH/USDT": "ETHUSD",
+            "SOL/USDT": "SOLUSD", "BNB/USDT": "BNBUSD",
+        }
+        pair = kraken_map.get(symbol)
+        if not pair:
+            raise ValueError(f"No Kraken mapping for {symbol}")
+
+        tf_map = {
+            "1m": 1, "5m": 5, "15m": 15, "30m": 30,
+            "1h": 60, "4h": 240, "1d": 1440,
+        }
+        interval = tf_map.get(timeframe)
+        if not interval:
+            raise ValueError(f"Unsupported timeframe for Kraken: {timeframe}")
+
+        r = requests.get(
+            "https://api.kraken.com/0/public/OHLC",
+            params={"pair": pair, "interval": interval},
+            timeout=15
+        )
+        if r.status_code != 200:
+            raise ValueError(f"Kraken HTTP {r.status_code}")
+
+        data = r.json()
+        if data.get("error") and data["error"]:
+            raise ValueError(f"Kraken error: {data['error']}")
+
+        result = data.get("result", {})
+        key    = [k for k in result if k != "last"]
+        if not key:
+            raise ValueError("No candle data from Kraken")
+
+        raw = result[key[0]][-limit:]
+        df  = pd.DataFrame(raw, columns=[
+            "time","open","high","low","close","vwap","volume","count"
+        ])
+        df["ts"] = pd.to_datetime(df["time"].astype(int), unit="s")
+        df = df.set_index("ts")
+        df = df[["open","high","low","close","volume"]].astype(float)
+        print(f"    [Internet] Kraken: {len(df)} {timeframe} candles for {symbol}")
+        return df
+
     def _candles_coingecko(self, symbol, timeframe, limit):
         """CoinGecko OHLC — confirmed working on Railway."""
         coins   = self.coin_map.get(symbol, {})
@@ -150,11 +280,17 @@ class InternetAgent:
         # For 15m/5m → use days=1 (30min, ~48 candles) — fewer but works
         # For 1h     → use days=14 (4h, ~84 candles)
         # For 4h     → use days=30 (4h, ~180 candles)
+        # Using more days to get enough candles
+        # CoinGecko: 1 day = ~48 candles (30min), 2 days = ~96
         tf_days = {
-            "5m": 1, "15m": 1, "30m": 1,
-            "1h": 14, "4h": 30, "1d": 90,
+            "5m":  2,   # ~96 candles
+            "15m": 2,   # ~96 candles
+            "30m": 2,   # ~96 candles
+            "1h":  14,  # ~84 candles (4h resolution)
+            "4h":  30,  # ~180 candles
+            "1d":  90,  # daily candles
         }
-        days = tf_days.get(timeframe, 1)
+        days = tf_days.get(timeframe, 2)
 
         r = requests.get(
             f"https://api.coingecko.com/api/v3/coins/{cg_id}/ohlc",
