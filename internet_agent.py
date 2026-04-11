@@ -266,53 +266,64 @@ class InternetAgent:
         return df
 
     def _candles_coingecko(self, symbol, timeframe, limit):
-        """CoinGecko OHLC — confirmed working on Railway."""
-        coins   = self.coin_map.get(symbol, {})
-        cg_id   = coins.get("cg")
+        """
+        CoinGecko market_chart endpoint.
+        Free, no key needed, builds OHLCV from price history.
+        """
+        coins = self.coin_map.get(symbol, {})
+        cg_id = coins.get("cg")
         if not cg_id:
             raise ValueError(f"No CoinGecko mapping for {symbol}")
 
-        # CoinGecko days → candle size:
-        # days=1  → 30min candles
-        # days=7+ → 4h candles
-        # days=90+→ daily candles
-        # We need ~200 candles so:
-        # For 15m/5m → use days=1 (30min, ~48 candles) — fewer but works
-        # For 1h     → use days=14 (4h, ~84 candles)
-        # For 4h     → use days=30 (4h, ~180 candles)
-        # Using more days to get enough candles
-        # CoinGecko: 1 day = ~48 candles (30min), 2 days = ~96
         tf_days = {
-            "5m":  2,   # ~96 candles
-            "15m": 2,   # ~96 candles
-            "30m": 2,   # ~96 candles
-            "1h":  14,  # ~84 candles (4h resolution)
-            "4h":  30,  # ~180 candles
-            "1d":  90,  # daily candles
+            "5m": 1, "15m": 1, "30m": 2,
+            "1h": 7, "4h": 30, "1d": 90,
         }
-        days = tf_days.get(timeframe, 2)
+        days     = tf_days.get(timeframe, 1)
+        interval = "minutely" if days <= 1 else "hourly"
 
         r = requests.get(
-            f"https://api.coingecko.com/api/v3/coins/{cg_id}/ohlc",
-            params={"vs_currency": "usd", "days": days},
+            f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart",
+            params={"vs_currency": "usd", "days": days, "interval": interval},
             timeout=15
         )
+        if r.status_code == 429:
+            raise ValueError("CoinGecko rate limited")
         if r.status_code != 200:
             raise ValueError(f"CoinGecko HTTP {r.status_code}")
 
-        raw = r.json()
-        if not raw or len(raw) < 10:
-            raise ValueError(f"Only {len(raw)} candles from CoinGecko")
+        data   = r.json()
+        prices = data.get("prices", [])
+        vols   = data.get("total_volumes", [])
 
-        # CoinGecko format: [timestamp_ms, open, high, low, close]
-        df = pd.DataFrame(raw, columns=["ts","open","high","low","close"])
-        df["ts"] = pd.to_datetime(df["ts"], unit="ms")
-        df = df.set_index("ts")
-        df["volume"] = 0.0   # CoinGecko OHLC has no volume — use 0
-        df = df[["open","high","low","close","volume"]].astype(float)
-        df = df.tail(limit)
-        print(f"    [Internet] CoinGecko: {len(df)} candles for {symbol} (no volume data)")
-        return df
+        if len(prices) < 10:
+            raise ValueError(f"Only {len(prices)} price points from CoinGecko")
+
+        df_p = pd.DataFrame(prices, columns=["ts", "price"])
+        df_v = pd.DataFrame(vols,   columns=["ts", "volume"])
+        df_p["ts"] = pd.to_datetime(df_p["ts"], unit="ms")
+        df_v["ts"] = pd.to_datetime(df_v["ts"], unit="ms")
+        df_p = df_p.set_index("ts")
+        df_v = df_v.set_index("ts")
+        df   = df_p.join(df_v, how="left")
+
+        tf_resample = {
+            "5m":"5min","15m":"15min","30m":"30min",
+            "1h":"1h","4h":"4h","1d":"1D",
+        }
+        rule     = tf_resample.get(timeframe, "15min")
+        df_ohlcv = df["price"].resample(rule).agg(
+            open="first", high="max", low="min", close="last"
+        )
+        df_ohlcv["volume"] = df["volume"].resample(rule).mean().fillna(0)
+        df_ohlcv = df_ohlcv.dropna(subset=["open","close"])
+        df_ohlcv = df_ohlcv.tail(limit)
+
+        if len(df_ohlcv) < 10:
+            raise ValueError(f"Only {len(df_ohlcv)} candles after resample")
+
+        print(f"    [Internet] CoinGecko: {len(df_ohlcv)} {timeframe} candles for {symbol}")
+        return df_ohlcv
 
     def calculate_indicators(self, df):
         c = df["close"]
@@ -353,23 +364,31 @@ class InternetAgent:
             return None
 
     def get_coingecko_data(self, coin):
+        """Uses CoinGecko simple price endpoint — free, no auth needed."""
         coin_ids = {"BTC":"bitcoin","ETH":"ethereum","SOL":"solana","BNB":"binancecoin"}
         coin_id  = coin_ids.get(coin)
         if not coin_id:
             return None
         try:
             r = requests.get(
-                f"https://api.coingecko.com/api/v3/coins/{coin_id}",
-                params={"localization":"false","tickers":"false","community_data":"false"},
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={
+                    "ids":                coin_id,
+                    "vs_currencies":      "usd",
+                    "include_24hr_change": "true",
+                    "include_market_cap":  "true",
+                },
                 timeout=10
             )
             if r.status_code == 200:
-                data = r.json()
-                md   = data.get("market_data", {})
+                data   = r.json().get(coin_id, {})
                 return {
-                    "price_change_24h": md.get("price_change_percentage_24h", 0),
-                    "market_cap_rank":  data.get("market_cap_rank", 0),
+                    "price_change_24h": data.get("usd_24h_change", 0),
+                    "market_cap_rank":  0,
+                    "price":            data.get("usd", 0),
                 }
+            if r.status_code == 429:
+                print(f"    [Internet] CoinGecko rate limited — skip")
             return None
         except Exception as e:
             print(f"    [Internet] CoinGecko error: {e}")

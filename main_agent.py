@@ -59,7 +59,7 @@ CONFIG = {
     # Coins to watch
     "symbols":        ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
     "timeframe":      "15m",
-    "scan_every":     60,       # 5 minutes — good for Railway free tier
+    "scan_every":     300,       # 5 minutes — good for Railway free tier
 
     # Your account
     "account_usdt":   1000,
@@ -227,13 +227,23 @@ def run():
         diag["fear_greed"] = f"❌ Failed — {str(e)[:50]}"
     print(f"  Fear & Greed  : {diag['fear_greed']}")
 
-    # Test 3 — CoinGecko
+    # Test 3 — CoinGecko (24h market data only — OHLC endpoint now needs paid key)
     try:
-        cg_test = internet.get_coingecko_data("BTC")
-        if cg_test:
-            diag["coingecko"] = f"✅ Working — 24h change {cg_test['price_change_24h']:+.2f}%"
+        import requests as rq
+        r_cg = rq.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "bitcoin", "vs_currencies": "usd", "include_24hr_change": "true"},
+            timeout=10
+        )
+        if r_cg.status_code == 200:
+            cg_data = r_cg.json().get("bitcoin", {})
+            price   = cg_data.get("usd", 0)
+            change  = cg_data.get("usd_24h_change", 0)
+            diag["coingecko"] = f"✅ Working — BTC ${price:,.0f} ({change:+.2f}% 24h)"
+        elif r_cg.status_code == 429:
+            diag["coingecko"] = "⚠️  Rate limited — resets in 1 min"
         else:
-            diag["coingecko"] = "❌ No data returned"
+            diag["coingecko"] = f"❌ Error {r_cg.status_code}"
     except Exception as e:
         diag["coingecko"] = f"❌ Failed — {str(e)[:50]}"
     print(f"  CoinGecko     : {diag['coingecko']}")
@@ -362,7 +372,7 @@ def run():
     telegram.send(
         "✅ <b>Bot is ONLINE on Railway</b>\n\n"
         "📡 <b>API Status:</b>\n"
-        f"  KuCoin prices : {diag.get('kucoin','?')[:40]}\n"
+        f"  Price data    : {diag.get('kucoin','?')[:40]}\n"
         f"  Fear & Greed  : {diag.get('fear_greed','?')[:40]}\n"
         f"  CoinGecko     : {diag.get('coingecko','?')[:40]}\n"
         f"  News API      : {diag.get('news','?')[:40]}\n"
