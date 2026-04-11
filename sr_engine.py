@@ -133,35 +133,55 @@ class MultiTimeframeSR:
         "15m": {"interval": 15,   "label": "15 Min",  "weight": 1, "candles": 100},
     }
 
+    # Using Binance US — confirmed working from Railway
     COIN_MAP = {
-        "BTC/USDT": "XBTUSD",
-        "ETH/USDT": "ETHUSD",
-        "SOL/USDT": "SOLUSD",
-        "BNB/USDT": "BNBUSD",
+        "BTC/USDT": "BTCUSDT",
+        "ETH/USDT": "ETHUSDT",
+        "SOL/USDT": "SOLUSDT",
+        "BNB/USDT": "BNBUSDT",
     }
 
     def __init__(self):
         self.finder = LevelFinder()
         self.cache  = {}
 
-    def _fetch_kraken(self, pair, interval, candles):
+    def _fetch_binanceus(self, pair, interval_minutes, candles):
+        """
+        Fetches candles from Binance US public API.
+        No key needed. Confirmed working from Railway.
+        pair = "BTCUSDT", "ETHUSDT", "SOLUSDT" etc
+        """
+        # Binance interval strings
+        interval_map = {
+            1440: "1d", 60: "1h", 30: "30m", 15: "15m",
+            5: "5m", 1: "1m", 240: "4h",
+        }
+        interval = interval_map.get(interval_minutes, "15m")
+
         r = requests.get(
-            "https://api.kraken.com/0/public/OHLC",
-            params={"pair": pair, "interval": interval},
-            timeout=15
+            "https://api.binance.us/api/v3/klines",
+            params={
+                "symbol":   pair,
+                "interval": interval,
+                "limit":    min(candles, 1000),
+            },
+            timeout=15,
+            headers={"User-Agent": "Mozilla/5.0"}
         )
+        if r.status_code == 451:
+            raise ValueError("Binance US geo-blocked")
         if r.status_code != 200:
-            raise ValueError(f"Kraken HTTP {r.status_code}")
-        data = r.json()
-        if data.get("error"):
-            raise ValueError(f"Kraken: {data['error']}")
-        result  = data.get("result", {})
-        key     = [k for k in result if k != "last"][0]
-        raw     = result[key][-candles:]
-        df      = pd.DataFrame(raw, columns=[
-            "time","open","high","low","close","vwap","volume","count"
+            raise ValueError(f"Binance US HTTP {r.status_code}")
+
+        raw = r.json()
+        if not raw:
+            raise ValueError("Empty response from Binance US")
+
+        df = pd.DataFrame(raw, columns=[
+            "ts","open","high","low","close","volume",
+            "close_ts","quote_vol","trades","tbbase","tbquote","ignore"
         ])
-        df["ts"] = pd.to_datetime(df["time"].astype(int), unit="s")
+        df["ts"] = pd.to_datetime(df["ts"], unit="ms")
         df = df.set_index("ts")
         df = df[["open","high","low","close","volume"]].astype(float)
         return df
@@ -176,7 +196,7 @@ class MultiTimeframeSR:
 
         for tf, config in self.TIMEFRAMES.items():
             try:
-                df = self._fetch_kraken(pair, config["interval"], config["candles"])
+                df = self._fetch_binanceus(pair, config["interval"], config["candles"])
                 support, resistance = self.finder.find_swing_levels(
                     df,
                     lookback    = 5 if tf in ("15m","30m") else 3,

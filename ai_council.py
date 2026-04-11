@@ -420,29 +420,34 @@ class ConfluenceScorer:
             return "HOLD", 0
 
         # Bonus for multi-timeframe confluence
-        mtf_bonus = {"ALL3": 20, "15M_1H": 12, "5M_15M": 6, "NONE": 0}.get(mtf_confluence, 0)
+        mtf_bonus = {"ALL3": 25, "15M_1H": 18, "5M_15M": 10, "NONE": 0}.get(mtf_confluence, 0)
 
-        # Bonus for market regime matching signal
+        # Bonus for market regime
         regime_bonus = 0
         if regime == "TRENDING":
-            regime_bonus = 8  # trending market — signals are more reliable
+            regime_bonus = 10
         elif regime == "RANGING":
-            regime_bonus = 5  # ranging — reversal signals work better
+            regime_bonus = 6
         elif regime == "VOLATILE":
-            regime_bonus = -10  # volatile — reduce confidence
+            regime_bonus = -8
+        elif regime == "NORMAL":
+            regime_bonus = 5   # normal is fine — still give small bonus
 
         # Bonus for support/resistance confirmation
         sr_bonus = 0
         if direction == "BUY"  and sr_zone == "NEAR_SUPPORT":
-            sr_bonus = 10  # buying at support — strong confluence
+            sr_bonus = 12
         elif direction == "SELL" and sr_zone == "NEAR_RESISTANCE":
-            sr_bonus = 10  # selling at resistance — strong confluence
+            sr_bonus = 12
         elif direction == "BUY"  and sr_zone == "NEAR_RESISTANCE":
-            sr_bonus = -10  # buying at resistance — bad timing
+            sr_bonus = -8
         elif direction == "SELL" and sr_zone == "NEAR_SUPPORT":
-            sr_bonus = -10  # selling at support — bad timing
+            sr_bonus = -8
+        elif sr_zone == "CLEAR":
+            sr_bonus = 3   # price in clear space is fine
 
         final_score = min(100, max(0, base_score + mtf_bonus + regime_bonus + sr_bonus))
+        print(f"    [Score] base={base_score:.0f} mtf={mtf_bonus:+d} regime={regime_bonus:+d} sr={sr_bonus:+d} → total={final_score:.0f}")
 
         # Minimum score to fire a signal
         if final_score < 52:
