@@ -19,29 +19,36 @@ class InternetAgent:
 
     def __init__(self, config):
         self.config = config
-        # Price sources confirmed working on Railway:
-        # 1. Kraken public API — US exchange, no geo blocks
-        # 2. CoinGecko OHLC   — already confirmed working above
+        # Alpha Vantage — free crypto OHLCV API
+        # 500 requests/day free, no geo restrictions
+        # Get free key at: alphavantage.co/support/#api-key
+        # Add as ALPHA_VANTAGE_KEY in Railway Variables
+        self.av_key  = config.get("alpha_vantage_key", "")
+        self.av_base = "https://www.alphavantage.co/query"
+
+        # CoinGecko as fallback (confirmed working)
         self.coin_map = {
-            "BTC/USDT": {"kraken": "XBTUSD",  "cg": "bitcoin"},
-            "ETH/USDT": {"kraken": "ETHUSD",  "cg": "ethereum"},
-            "SOL/USDT": {"kraken": "SOLUSD",  "cg": "solana"},
-            "BNB/USDT": {"kraken": "BNBUSD",  "cg": "binancecoin"},
+            "BTC/USDT": {"cg": "bitcoin",      "av": "BTC"},
+            "ETH/USDT": {"cg": "ethereum",     "av": "ETH"},
+            "SOL/USDT": {"cg": "solana",       "av": "SOL"},
+            "BNB/USDT": {"cg": "binancecoin",  "av": "BNB"},
         }
         self.exchange = None
 
     def get_candles(self, symbol, timeframe, limit=200):
         """
-        Fetches OHLCV candles. Tries Kraken first, then CoinGecko.
-        Both confirmed to work from Railway USA servers.
+        Fetches OHLCV candles.
+        1. Alpha Vantage (500 req/day free, full OHLCV)
+        2. CoinGecko OHLC (confirmed working, fallback)
         """
-        # Try Kraken first
-        try:
-            df = self._candles_kraken(symbol, timeframe, limit)
-            if df is not None and len(df) >= 50:
-                return df
-        except Exception as e:
-            print(f"    [Internet] Kraken failed: {str(e)[:60]} — trying CoinGecko")
+        # Try Alpha Vantage first if key is set
+        if self.av_key:
+            try:
+                df = self._candles_alphavantage(symbol, timeframe, limit)
+                if df is not None and len(df) >= 50:
+                    return df
+            except Exception as e:
+                print(f"    [Internet] Alpha Vantage failed: {str(e)[:60]} — trying CoinGecko")
 
         # Fall back to CoinGecko
         try:
@@ -49,54 +56,83 @@ class InternetAgent:
             if df is not None and len(df) >= 50:
                 return df
         except Exception as e:
-            print(f"    [Internet] CoinGecko failed: {str(e)[:60]}")
+            print(f"    [Internet] CoinGecko OHLC failed: {str(e)[:60]}")
 
         raise ConnectionError(f"All price sources failed for {symbol}")
 
-    def _candles_kraken(self, symbol, timeframe, limit):
-        """Kraken public OHLC API — US exchange, no geo restrictions."""
-        coins  = self.coin_map.get(symbol, {})
-        pair   = coins.get("kraken")
-        if not pair:
-            raise ValueError(f"No Kraken mapping for {symbol}")
+    def _candles_alphavantage(self, symbol, timeframe, limit):
+        """
+        Alpha Vantage crypto OHLCV API.
+        500 requests/day free. No geo restrictions.
+        Get key at: alphavantage.co/support/#api-key
+        """
+        coins = self.coin_map.get(symbol, {})
+        coin  = coins.get("av", symbol.split("/")[0])
 
-        # Kraken interval in minutes
+        # Alpha Vantage function names
         tf_map = {
-            "1m": 1, "5m": 5, "15m": 15, "30m": 30,
-            "1h": 60, "4h": 240, "1d": 1440,
+            "1m":  ("CRYPTO_INTRADAY", "1min"),
+            "5m":  ("CRYPTO_INTRADAY", "5min"),
+            "15m": ("CRYPTO_INTRADAY", "15min"),
+            "30m": ("CRYPTO_INTRADAY", "30min"),
+            "1h":  ("CRYPTO_INTRADAY", "60min"),
+            "1d":  ("DIGITAL_CURRENCY_DAILY", None),
         }
-        interval = tf_map.get(timeframe)
-        if not interval:
+
+        if timeframe not in tf_map:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
 
-        r = requests.get(
-            "https://api.kraken.com/0/public/OHLC",
-            params={"pair": pair, "interval": interval},
-            timeout=15
-        )
+        func, interval = tf_map[timeframe]
+
+        params = {
+            "function":   func,
+            "symbol":     coin,
+            "market":     "USD",
+            "apikey":     self.av_key,
+            "outputsize": "full",
+        }
+        if interval:
+            params["interval"] = interval
+
+        r = requests.get(self.av_base, params=params, timeout=20)
         if r.status_code != 200:
-            raise ValueError(f"Kraken HTTP {r.status_code}")
+            raise ValueError(f"Alpha Vantage HTTP {r.status_code}")
 
         data = r.json()
-        if data.get("error"):
-            raise ValueError(f"Kraken error: {data['error']}")
 
-        # Result key is the pair name (may differ slightly)
-        result = data.get("result", {})
-        candle_key = [k for k in result.keys() if k != "last"]
-        if not candle_key:
-            raise ValueError("No candle data in Kraken response")
+        # Check for error or rate limit
+        if "Note" in data:
+            raise ValueError("Alpha Vantage rate limit — 5 requests/min, 500/day")
+        if "Error Message" in data:
+            raise ValueError(f"Alpha Vantage error: {data['Error Message'][:60]}")
+        if "Information" in data:
+            raise ValueError("Alpha Vantage: " + data["Information"][:80])
 
-        raw = result[candle_key[0]]
-        # Kraken format: [time, open, high, low, close, vwap, volume, count]
-        df = pd.DataFrame(raw, columns=[
-            "time","open","high","low","close","vwap","volume","count"
-        ])
-        df["ts"] = pd.to_datetime(df["time"].astype(int), unit="s")
-        df = df.set_index("ts")
-        df = df[["open","high","low","close","volume"]].astype(float)
+        # Find the time series key
+        ts_key = [k for k in data if "Time Series" in k]
+        if not ts_key:
+            raise ValueError("No time series in Alpha Vantage response")
+
+        ts = data[ts_key[0]]
+        rows = []
+        for ts_str, vals in ts.items():
+            try:
+                # AV keys vary: "1. open", "1a. open (USD)", etc
+                o = float(next(v for k,v in vals.items() if "open"   in k.lower()))
+                h = float(next(v for k,v in vals.items() if "high"   in k.lower()))
+                l = float(next(v for k,v in vals.items() if "low"    in k.lower()))
+                c = float(next(v for k,v in vals.items() if "close"  in k.lower()))
+                v = float(next((v for k,v in vals.items() if "volume" in k.lower()), 0))
+                rows.append({"ts": pd.Timestamp(ts_str), "open": o, "high": h, "low": l, "close": c, "volume": v})
+            except Exception:
+                continue
+
+        if not rows:
+            raise ValueError("Could not parse Alpha Vantage candles")
+
+        df = pd.DataFrame(rows).set_index("ts").sort_index()
         df = df.tail(limit)
-        print(f"    [Internet] Kraken: {len(df)} {timeframe} candles for {symbol}")
+        print(f"    [Internet] Alpha Vantage: {len(df)} {timeframe} candles for {symbol}")
         return df
 
     def _candles_coingecko(self, symbol, timeframe, limit):
@@ -204,25 +240,69 @@ class InternetAgent:
             return None
 
     def get_news(self, coin_name):
-        key = self.config.get("news_api_key", "")
-        if not key:
+        """
+        Fetches news from Currents API (600 req/day free)
+        Falls back to NewsAPI if Currents key not set.
+
+        Get Currents API key free at:
+        https://currentsapi.services/en/register
+        Add as CURRENTS_API_KEY in Railway Variables
+
+        NewsAPI key → NEWS_API_KEY  (100/day, backup)
+        Currents key → CURRENTS_API_KEY (600/day, recommended)
+        """
+        # Try Currents API first (600/day free)
+        currents_key = self.config.get("currents_api_key", "")
+        if currents_key:
+            try:
+                r = requests.get(
+                    "https://api.currentsapi.services/v1/search",
+                    params={
+                        "keywords":  f"{coin_name} crypto",
+                        "language":  "en",
+                        "apiKey":    currents_key,
+                    },
+                    timeout=10
+                )
+                if r.status_code == 200:
+                    news = r.json().get("news", [])
+                    headlines = [a["title"] for a in news if a.get("title")]
+                    if headlines:
+                        print(f"    [Internet] Currents API: {len(headlines)} headlines")
+                        return headlines
+                elif r.status_code == 429:
+                    print("    [Internet] Currents API rate limited today")
+                else:
+                    print(f"    [Internet] Currents API error: {r.status_code}")
+            except Exception as e:
+                print(f"    [Internet] Currents API error: {e}")
+
+        # Fall back to NewsAPI (100/day)
+        news_key = self.config.get("news_api_key", "")
+        if not news_key:
             return []
         try:
             r = requests.get(
                 "https://newsapi.org/v2/everything",
                 params={
-                    "q": f"{coin_name} crypto", "sortBy": "publishedAt",
-                    "pageSize": 10, "language": "en",
-                    "from": (datetime.now()-timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S"),
-                    "apiKey": key,
+                    "q":        f"{coin_name} crypto",
+                    "sortBy":   "publishedAt",
+                    "pageSize": 10,
+                    "language": "en",
+                    "from":     (datetime.now()-timedelta(hours=6)).strftime("%Y-%m-%dT%H:%M:%S"),
+                    "apiKey":   news_key,
                 },
                 timeout=10
             )
             if r.status_code == 200:
-                return [a["title"] for a in r.json().get("articles",[]) if a.get("title")]
+                articles = r.json().get("articles", [])
+                headlines = [a["title"] for a in articles if a.get("title")]
+                if headlines:
+                    print(f"    [Internet] NewsAPI: {len(headlines)} headlines")
+                return headlines
             return []
         except Exception as e:
-            print(f"    [Internet] News error: {e}")
+            print(f"    [Internet] NewsAPI error: {e}")
             return []
 
     def get_market_data(self, symbol, timeframe):

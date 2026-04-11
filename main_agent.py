@@ -59,7 +59,7 @@ CONFIG = {
     # Coins to watch
     "symbols":        ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
     "timeframe":      "15m",
-    "scan_every":     60,       # 5 minutes — good for Railway free tier
+    "scan_every":     300,       # 5 minutes — good for Railway free tier
 
     # Your account
     "account_usdt":   1000,
@@ -259,20 +259,40 @@ def run():
                 diag["news"] = f"✅ Working — {len(articles)} articles returned"
                 diag["news_detail"] = articles[0]["title"][:60] if articles else "no articles"
             elif r.status_code == 401:
-                diag["news"] = "❌ WRONG KEY — go to newsapi.org → your account → API Key"
-                diag["news_detail"] = "Copy the key exactly, no spaces"
+                diag["news"] = "❌ WRONG KEY — check NEWS_API_KEY value"
+                diag["news_detail"] = "Recommend: use CURRENTS_API_KEY instead (600/day free)"
             elif r.status_code == 426:
-                diag["news"] = "❌ Free tier expired — newsapi.org free = dev only (localhost)"
-                diag["news_detail"] = "Railway is a server — needs paid plan OR use gnews.io free alternative"
+                diag["news"] = "❌ NewsAPI blocks servers — use Currents API instead"
+                diag["news_detail"] = "Sign up free at currentsapi.services, add as CURRENTS_API_KEY"
             elif r.status_code == 429:
-                diag["news"] = "⚠️  Rate limited — 100 req/day on free tier"
-                diag["news_detail"] = "Key works — just too many requests today"
+                diag["news"] = "⚠️  NewsAPI rate limited (100/day) — switch to Currents (600/day)"
+                diag["news_detail"] = "currentsapi.services — free, 600 req/day, works on servers"
             else:
-                diag["news"] = f"❌ Error {r.status_code} — {r.text[:60]}"
+                diag["news"] = f"❌ Error {r.status_code}"
                 diag["news_detail"] = ""
         except Exception as e:
             diag["news"] = f"❌ Failed — {str(e)[:50]}"
             diag["news_detail"] = ""
+
+    # Also check Currents API
+    currents_key = CONFIG.get("currents_api_key","")
+    if currents_key:
+        try:
+            import requests as rq
+            rc = rq.get(
+                "https://api.currentsapi.services/v1/search",
+                params={"keywords":"bitcoin","language":"en","apiKey":currents_key},
+                timeout=10
+            )
+            if rc.status_code == 200:
+                count = len(rc.json().get("news",[]))
+                diag["news"] = f"✅ Currents API working — {count} articles (600/day)"
+            elif rc.status_code == 429:
+                diag["news"] = "⚠️  Currents API rate limited today — resets midnight UTC"
+            else:
+                diag["news"] = f"❌ Currents API error {rc.status_code} — check CURRENTS_API_KEY"
+        except Exception as e:
+            diag["news"] = f"❌ Currents API failed: {str(e)[:50]}"
     print(f"  News API      : {diag['news']}")
     if diag.get("news_detail"):
         print(f"                  {diag['news_detail']}")
