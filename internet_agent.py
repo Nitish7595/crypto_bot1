@@ -23,8 +23,9 @@ class InternetAgent:
         # 500 requests/day free, no geo restrictions
         # Get free key at: alphavantage.co/support/#api-key
         # Add as ALPHA_VANTAGE_KEY in Railway Variables
-        self.av_key  = config.get("alpha_vantage_key", "")
-        self.av_base = "https://www.alphavantage.co/query"
+        self.av_key      = config.get("alpha_vantage_key", "")
+        self.av_base     = "https://www.alphavantage.co/query"
+        self.finnhub_key = config.get("finnhub_key", "")
 
         # CoinGecko as fallback (confirmed working)
         self.coin_map = {
@@ -54,7 +55,17 @@ class InternetAgent:
 
         errors = []
 
-        # Source 1 — Alpha Vantage (needs free key)
+        # Source 1 — Finnhub (60 req/min free, no geo blocks, recommended)
+        if self.finnhub_key:
+            try:
+                df = self._candles_finnhub(symbol, timeframe, limit)
+                if df is not None and len(df) >= 30:
+                    self._candle_cache[cache_key] = (df, now)
+                    return df
+            except Exception as e:
+                errors.append(f"Finnhub:{str(e)[:50]}")
+
+        # Source 2 — Alpha Vantage (needs free key)
         if self.av_key:
             try:
                 df = self._candles_alphavantage(symbol, timeframe, limit)
@@ -73,7 +84,7 @@ class InternetAgent:
         except Exception as e:
             errors.append(f"BinanceUS:{str(e)[:40]}")
 
-        # Source 3 — Kraken
+        # Source 4 — Kraken
         try:
             df = self._candles_kraken(symbol, timeframe, limit)
             if df is not None and len(df) >= 30:
@@ -82,7 +93,7 @@ class InternetAgent:
         except Exception as e:
             errors.append(f"Kraken:{str(e)[:40]}")
 
-        # Source 4 — CoinGecko (always works)
+        # Source 5 — CoinGecko (always works)
         try:
             df = self._candles_coingecko(symbol, timeframe, limit)
             if df is not None and len(df) >= 30:
@@ -93,6 +104,91 @@ class InternetAgent:
 
         print(f"    [Internet] All sources failed: {' | '.join(errors)}")
         raise ConnectionError(f"All price sources failed for {symbol}")
+
+    def _candles_finnhub(self, symbol, timeframe, limit):
+        """
+        Finnhub crypto candles API.
+        Free tier: 60 requests/minute — no daily limit.
+        No geo restrictions. Works from any server.
+        Get free key at: finnhub.io
+        Add as FINNHUB_KEY in Railway Variables.
+        """
+        coin = symbol.split("/")[0]
+
+        # Finnhub uses Binance symbol format
+        pair = f"BINANCE:{coin}USDT"
+
+        # Finnhub resolution strings
+        tf_map = {
+            "1m":  "1",
+            "5m":  "5",
+            "15m": "15",
+            "30m": "30",
+            "1h":  "60",
+            "4h":  "240",
+            "1d":  "D",
+        }
+        resolution = tf_map.get(timeframe)
+        if not resolution:
+            raise ValueError(f"Unsupported timeframe: {timeframe}")
+
+        # Calculate time range
+        import time as time_module
+        now_ts   = int(time_module.time())
+        # How many seconds per candle × limit
+        seconds_map = {
+            "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+            "1h": 3600, "4h": 14400, "1d": 86400,
+        }
+        seconds = seconds_map.get(timeframe, 900)
+        from_ts = now_ts - (seconds * limit * 2)  # 2x buffer
+
+        r = requests.get(
+            "https://finnhub.io/api/v1/crypto/candle",
+            params={
+                "symbol":     pair,
+                "resolution": resolution,
+                "from":       from_ts,
+                "to":         now_ts,
+                "token":      self.finnhub_key,
+            },
+            timeout=15
+        )
+
+        if r.status_code == 429:
+            raise ValueError("Finnhub rate limited — 60/min exceeded")
+        if r.status_code != 200:
+            raise ValueError(f"Finnhub HTTP {r.status_code}")
+
+        data = r.json()
+
+        if data.get("s") == "no_data":
+            raise ValueError(f"Finnhub: no data for {symbol} {timeframe}")
+
+        if data.get("s") != "ok":
+            raise ValueError(f"Finnhub status: {data.get('s','unknown')}")
+
+        timestamps = data.get("t", [])
+        opens      = data.get("o", [])
+        highs      = data.get("h", [])
+        lows       = data.get("l", [])
+        closes     = data.get("c", [])
+        volumes    = data.get("v", [])
+
+        if len(timestamps) < 10:
+            raise ValueError(f"Finnhub: only {len(timestamps)} candles")
+
+        df = pd.DataFrame({
+            "open":   opens,
+            "high":   highs,
+            "low":    lows,
+            "close":  closes,
+            "volume": volumes,
+        }, index=pd.to_datetime(timestamps, unit="s"))
+
+        df = df.sort_index().tail(limit)
+        print(f"    [Internet] Finnhub: {len(df)} {timeframe} candles for {symbol}")
+        return df
 
     def _candles_alphavantage(self, symbol, timeframe, limit):
         """
