@@ -59,7 +59,7 @@ CONFIG = {
     # Coins to watch
     "symbols":        ["BTC/USDT", "ETH/USDT", "SOL/USDT"],
     "timeframe":      "15m",
-    "scan_every":     60,       # 5 minutes — good for Railway free tier
+    "scan_every":     300,       # 5 minutes — good for Railway free tier
 
     # Your account
     "account_usdt":   1000,
@@ -426,23 +426,39 @@ def run():
                 # ── STEP 5: Print signal clearly ────────────────
                 print_signal(symbol, decision)
 
-                # ── STEP 6: Send Telegram alert to your phone ───
-                telegram.send_signal(symbol, decision)
+                # ── STEP 6: Send Telegram — check delivery ───────
+                signal_id    = len(memory["trades"]) + 1
+                telegram_ok  = telegram.send_signal_with_id(symbol, decision, signal_id)
 
-                # ── STEP 7: Save to memory ───────────────────────
+                if not telegram_ok and telegram.enabled:
+                    # Telegram failed — retry once after 10 seconds
+                    print(f"  [{symbol}] Telegram failed — retrying in 10s...")
+                    time.sleep(10)
+                    telegram_ok = telegram.send_signal_with_id(symbol, decision, signal_id)
+
+                if not telegram_ok and telegram.enabled:
+                    print(f"  [{symbol}] ⚠️  Telegram failed after retry")
+                    print(f"  [{symbol}]    Signal printed to Railway log above")
+                    print(f"  [{symbol}]    Check Railway logs at dashboard")
+                else:
+                    print(f"  [{symbol}] ✅ Telegram delivered — signal #{signal_id}")
+
+                # Save to memory regardless — signal was printed to log
+                # even if Telegram failed you can see it in Railway
                 record = {
-                    "id":          len(memory["trades"]) + 1,
-                    "symbol":      symbol,
-                    "direction":   decision["action"],
-                    "entry_price": market_data["price"],
-                    "sl":          decision["levels"]["sl"],
-                    "tp1":         decision["levels"]["tp1"],
-                    "tp2":         decision["levels"]["tp2"],
-                    "entry_time":  str(market_data["df"].index[-1]),
-                    "result":      None,
-                    "exit_price":  None,
-                    "exit_time":   None,
-                    "pnl_pct":     None,
+                    "id":              signal_id,
+                    "telegram_sent":   telegram_ok,
+                    "symbol":          symbol,
+                    "direction":       decision["action"],
+                    "entry_price":     market_data["price"],
+                    "sl":              decision["levels"]["sl"],
+                    "tp1":             decision["levels"]["tp1"],
+                    "tp2":             decision["levels"]["tp2"],
+                    "entry_time":      str(market_data["df"].index[-1]),
+                    "result":          None,
+                    "exit_price":      None,
+                    "exit_time":       None,
+                    "pnl_pct":         None,
                     "ai_votes":    decision["votes"],
                 }
                 memory["trades"].append(record)

@@ -30,34 +30,54 @@ class TelegramAlert:
 
     def send(self, message):
         """
-        Sends message and retries 3 times if it fails.
-        Returns True if delivered, False if all attempts failed.
-        This is critical — if False, trade must NOT be saved to memory.
+        Sends Telegram message with 3 retries.
+        Returns True if delivered, False if all failed.
         """
         if not self.enabled:
-            return True  # not enabled = skip silently, not a failure
+            return True
+
+        url = f"https://api.telegram.org/bot{self.token}/sendMessage"
 
         for attempt in range(3):
             try:
-                url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-                r   = requests.post(url, json={
-                    "chat_id":    self.chat_id,
-                    "text":       message,
-                    "parse_mode": "HTML",
-                }, timeout=10)
+                r = requests.post(
+                    url,
+                    json={
+                        "chat_id":                  self.chat_id,
+                        "text":                     message,
+                        "parse_mode":               "HTML",
+                        "disable_web_page_preview": True,
+                    },
+                    timeout=15   # increased from 10
+                )
 
                 if r.status_code == 200:
-                    return True  # delivered successfully
+                    return True
 
-                print(f"    [Telegram] Send failed {r.status_code} attempt {attempt+1}/3")
+                # Telegram rate limit — wait longer
+                if r.status_code == 429:
+                    retry_after = r.json().get("parameters", {}).get("retry_after", 10)
+                    print(f"    [Telegram] Rate limited — waiting {retry_after}s")
+                    time.sleep(retry_after)
+                    continue
+
+                # Message too long — truncate and retry
+                if r.status_code == 400 and "too long" in r.text.lower():
+                    message = message[:3800] + "\n\n[truncated]"
+                    continue
+
+                print(f"    [Telegram] HTTP {r.status_code} attempt {attempt+1}/3: {r.text[:80]}")
                 time.sleep(5)
 
+            except requests.exceptions.Timeout:
+                print(f"    [Telegram] Timeout attempt {attempt+1}/3 — retrying")
+                time.sleep(5)
             except Exception as e:
-                print(f"    [Telegram] Error attempt {attempt+1}/3: {e}")
+                print(f"    [Telegram] Error attempt {attempt+1}/3: {str(e)[:60]}")
                 time.sleep(5)
 
-        print(f"    [Telegram] ALL 3 ATTEMPTS FAILED — trade will NOT be saved to memory")
-        return False  # caller must not save trade if this returns False
+        print(f"    [Telegram] ❌ ALL 3 ATTEMPTS FAILED")
+        return False
 
     def send_signal(self, symbol, decision):
         if not self.enabled:
@@ -175,6 +195,22 @@ class TelegramAlert:
 
         self.send(msg)
         print(f"    [Telegram] Signal sent to your phone")
+
+    def send_test(self):
+        """Sends a test message — call this to verify Telegram is working."""
+        now = datetime.now().strftime("%H:%M:%S")
+        msg = (
+            f"🔔 <b>Telegram Test</b>\n\n"
+            f"Time: {now}\n"
+            f"Status: Connection working\n"
+            f"<i>You will receive all signals here.</i>"
+        )
+        ok = self.send(msg)
+        if ok:
+            print(f"    [Telegram] ✅ Test message delivered successfully")
+        else:
+            print(f"    [Telegram] ❌ Test failed — check TELEGRAM_TOKEN and TELEGRAM_CHAT")
+        return ok
 
     def send_signal_with_id(self, symbol, decision, signal_id):
         """
